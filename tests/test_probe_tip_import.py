@@ -282,13 +282,19 @@ class TestLivePCDMIS:
     @pytest.fixture(autouse=True)
     def require_prg_file(self):
         import os
-        prg = os.environ.get("LIVE_PRG_FILE", self.PRG_FILE)
-        if not prg or not Path(prg).is_file():
+        raw = os.environ.get("LIVE_PRG_FILE", self.PRG_FILE)
+        if not raw:
             pytest.skip(
                 "No .PRG file available for live test. "
                 "Set LIVE_PRG_FILE env var or edit TestLivePCDMIS.PRG_FILE."
             )
-        self.prg_path = Path(prg)
+        # Resolve relative to the project root (parent of the tests/ folder)
+        prg = Path(raw)
+        if not prg.is_absolute():
+            prg = (Path(__file__).parent.parent / prg).resolve()
+        if not prg.is_file():
+            pytest.skip(f"LIVE_PRG_FILE path does not exist: {prg}")
+        self.prg_path = prg
 
     def test_open_program_and_read_commands(self, tmp_path):
         """Open a real .PRG, iterate commands, confirm type 61 or 60 is present."""
@@ -300,6 +306,7 @@ class TestLivePCDMIS:
         shutil.copy2(self.prg_path, copy_path)
 
         dmis_app = win32com.client.Dispatch("PCDLRN.Application")
+        dmis_part = None
         try:
             dmis_parts = dmis_app.PartPrograms
             dmis_part = dmis_parts.Open(str(copy_path), "OFFLINE")
@@ -307,9 +314,6 @@ class TestLivePCDMIS:
 
             command_count = dmis_commands.Count
             assert command_count > 0, "Program has no commands"
-
-            last = dmis_commands.Item(command_count)
-            dmis_commands.InsertionPointAfter(last)
 
             found_types = {cmd.Type for cmd in dmis_commands}
             print(f"\n[LIVE] Program: {dmis_part.Name}")
@@ -333,8 +337,11 @@ class TestLivePCDMIS:
                     print(f"[LIVE]   TIP       → {tip!r}")
                     assert isinstance(tip, str)
 
-            dmis_part.Quit()
+
         finally:
+            # Use the same shutdown behavior as production code: close part
+            # without prompting to save, then quit the application.
+            pti._close_part_no_save(dmis_part)
             dmis_app.Quit()
             shutil.rmtree(temp_dir, ignore_errors=True)
 

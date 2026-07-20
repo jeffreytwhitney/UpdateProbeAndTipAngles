@@ -56,44 +56,51 @@ def store_tip_angles(file_name: str, file_path: str, department_id: int) -> None
     copy_to_path = TEMP_DIR / file_name
     shutil.copy2(file_path, copy_to_path)
 
-    dmis_part = _dmis_parts.Open(str(copy_to_path), "OFFLINE")
-    dmis_commands = dmis_part.Commands
+    dmis_part = None
+    try:
+        dmis_part = _dmis_parts.Open(str(copy_to_path), "OFFLINE")
+        dmis_commands = dmis_part.Commands
 
-    # Set insertion point to end of program (required by the COM API before
-    # iterating – mirrors the original VBA pattern)
-    command_count = dmis_commands.Count
-    last_command = dmis_commands.Item(command_count)
-    dmis_commands.InsertionPointAfter(last_command)
+        # Set insertion point to end of program (mirrors the original VBA pattern).
+        # Item may be a property (not callable) depending on the PC-DMIS version,
+        # so we guard defensively.
+        try:
+            command_count = dmis_commands.Count
+            last_command = dmis_commands.Item(command_count)
+            if last_command is not None:
+                dmis_commands.InsertionPointAfter(last_command)
+        except TypeError:
+            pass  # Item is not callable in this PC-DMIS version – safe to skip
 
-    program_name: str = dmis_part.Name
-    set_status(program_name)
+        program_name: str = dmis_part.Name
+        set_status(program_name)
 
-    probe_name: str = ""
+        probe_name: str = ""
 
-    for dmis_command in dmis_commands:
-        cmd_type = dmis_command.Type
+        for dmis_command in dmis_commands:
+            cmd_type = dmis_command.Type
 
-        if cmd_type == 61:  # LOADPROBE
-            probe_name = dmis_command.GetText(152, 0)
+            if cmd_type == 61:  # LOADPROBE
+                probe_name = dmis_command.GetText(152, 0)
 
-        elif cmd_type == 60:  # TIP / ANGLE
-            tip_id = dmis_command.GetText(3, 0)
-            if probe_name:
-                sql = (
-                    "INSERT INTO tblTipAngles "
-                    "  (DepartmentID, ProgramName, ProbeName, TipName, IsStillThere) "
-                    "VALUES ("
-                    f"  {department_id}"
-                    f", '{_esc(program_name)}'"
-                    f", '{_esc(probe_name)}'"
-                    f", '{_esc(tip_id)}'"
-                    ",  1"          # IsStillThere = true  (VBA used -1 / Access Boolean)
-                    ")"
-                )
-                DB.execute_sql_statement(sql)
-
-    dmis_part.Quit()
-    copy_to_path.unlink(missing_ok=True)
+            elif cmd_type == 60:  # TIP / ANGLE
+                tip_id = dmis_command.GetText(3, 0)
+                if probe_name:
+                    sql = (
+                        "INSERT INTO tblTipAngles "
+                        "  (DepartmentID, ProgramName, ProbeName, TipName, IsStillThere) "
+                        "VALUES ("
+                        f"  {department_id}"
+                        f", '{_esc(program_name)}'"
+                        f", '{_esc(probe_name)}'"
+                        f", '{_esc(tip_id)}'"
+                        ",  1"          # IsStillThere = true  (VBA used -1 / Access Boolean)
+                        ")"
+                    )
+                    DB.execute_sql_statement(sql)
+    finally:
+        _close_part_no_save(dmis_part)
+        copy_to_path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -217,11 +224,14 @@ def run_probe_and_tip_import(
 
     finally:
         # ── Always clean up COM and temp dir ─────────────────────────────────
-        _dmis_app.Quit()
-        _dmis_parts = None
-        _dmis_app = None
-        if TEMP_DIR.exists():
-            shutil.rmtree(TEMP_DIR, ignore_errors=True)
+        try:
+            if _dmis_app is not None:
+                _dmis_app.Quit()
+        finally:
+            _dmis_parts = None
+            _dmis_app = None
+            if TEMP_DIR.exists():
+                shutil.rmtree(TEMP_DIR, ignore_errors=True)
 
     set_status("Done!")
 
@@ -229,6 +239,34 @@ def run_probe_and_tip_import(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _close_part_no_save(dmis_part: Optional[Any]) -> None:
+    """Close an open part without save prompts across COM signature variants."""
+    if dmis_part is None:
+        return
+
+    close_member = getattr(dmis_part, "Close", None)
+    if callable(close_member):
+        for args in ((False,), (0,), tuple()):
+            try:
+                close_member(*args)
+                return
+            except TypeError:
+                continue
+            except Exception:
+                break
+
+    quit_member = getattr(dmis_part, "Quit", None)
+    if callable(quit_member):
+        for args in ((False,), (0,), tuple()):
+            try:
+                quit_member(*args)
+                return
+            except TypeError:
+                continue
+            except Exception:
+                break
+
 
 def _esc(value: str) -> str:
     """Escape single quotes for inline SQL strings."""
