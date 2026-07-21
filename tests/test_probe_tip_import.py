@@ -86,8 +86,6 @@ class TestStoreTipAngles:
         # Arrange
         prg_file = tmp_path / "PART_A.PRG"
         prg_file.write_text("fake")
-        pti.TEMP_DIR = tmp_path / "pcdmis-temp"
-        pti.TEMP_DIR.mkdir()
 
         commands = [
             _make_command(61, {(152, 0): "PROBE_1"}),   # LOADPROBE
@@ -113,8 +111,6 @@ class TestStoreTipAngles:
         """TIP commands that appear before the first LOADPROBE should be ignored."""
         prg_file = tmp_path / "PART_X.PRG"
         prg_file.write_text("fake")
-        pti.TEMP_DIR = tmp_path / "pcdmis-temp"
-        pti.TEMP_DIR.mkdir()
 
         commands = [
             _make_command(60, {(3, 0): "T1A0B0"}),  # TIP with no probe yet
@@ -130,13 +126,10 @@ class TestStoreTipAngles:
 
         assert mock_exec.call_count == 1  # only the tip after the probe
 
-    def test_temp_file_cleaned_up(self, tmp_path):
-        """The copied .PRG file should be removed from the temp dir after processing."""
+    def test_source_file_deleted_after_successful_processing(self, tmp_path):
+        """The source .PRG should be deleted after successful DB updates."""
         prg_file = tmp_path / "PART_CLEAN.PRG"
         prg_file.write_text("fake")
-        temp_dir = tmp_path / "pcdmis-temp"
-        temp_dir.mkdir()
-        pti.TEMP_DIR = temp_dir
 
         mock_part = _make_dmis_part("PART_CLEAN", [_make_command(0, {})])
         pti._dmis_parts = MagicMock()
@@ -145,7 +138,7 @@ class TestStoreTipAngles:
         with patch("DB.execute_sql_statement"):
             pti.store_tip_angles("PART_CLEAN.PRG", str(prg_file), department_id=1)
 
-        assert not (temp_dir / "PART_CLEAN.PRG").exists()
+        assert not prg_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +148,6 @@ class TestStoreTipAngles:
 class TestEnumeratePCDMISPrograms:
     def test_new_files_are_stored(self, tmp_prg_dir, tmp_path):
         """Files not yet in the DB (count=0) should trigger store_tip_angles."""
-        pti.TEMP_DIR = tmp_path / "pcdmis-temp"
-        pti.TEMP_DIR.mkdir()
         pti._dmis_parts = MagicMock()
 
         with (
@@ -184,8 +175,8 @@ class TestEnumeratePCDMISPrograms:
         for c in mock_exec.call_args_list:
             assert "IsStillThere = 1" in c.args[0]
 
-    def test_non_prg_files_ignored(self, tmp_prg_dir):
-        """README.txt must never be passed to store_tip_angles."""
+    def test_non_prg_files_are_deleted(self, tmp_prg_dir):
+        """Non-.PRG files should be deleted from the queue directory."""
         with (
             patch("DB.get_sql_scalar", return_value=0),
             patch("probe_tip_import.store_tip_angles") as mock_store,
@@ -194,6 +185,21 @@ class TestEnumeratePCDMISPrograms:
 
         stored_names = {c.args[0] for c in mock_store.call_args_list}
         assert "README.txt" not in stored_names
+        assert not (tmp_prg_dir / "README.txt").exists()
+
+    def test_non_prg_files_in_subdirectories_are_deleted(self, tmp_prg_dir):
+        """Nested non-.PRG files should be deleted, but directories should remain."""
+        nested_noise = tmp_prg_dir / "subdir" / "notes.tmp"
+        nested_noise.write_text("delete me")
+
+        with (
+            patch("DB.get_sql_scalar", return_value=0),
+            patch("probe_tip_import.store_tip_angles"),
+        ):
+            pti.enumerate_pcdmis_programs(str(tmp_prg_dir), department_id=1)
+
+        assert not nested_noise.exists()
+        assert (tmp_prg_dir / "subdir").is_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -201,12 +207,13 @@ class TestEnumeratePCDMISPrograms:
 # ---------------------------------------------------------------------------
 
 class TestRunProbeAndTipImport:
-    def _run(self, tmp_path, **kwargs):
-        pti.TEMP_DIR = tmp_path / "pcdmis-temp"
+    def _run(self, tmp_path, open_run_rows=None, **kwargs):
         mock_app = MagicMock()
         with (
             patch("win32com.client.Dispatch", return_value=mock_app),
             patch("probe_tip_import.enumerate_pcdmis_programs"),
+            patch("DB.get_sql_recordset", return_value=open_run_rows or []),
+            patch("DB.execute_sql_scalar_statement", return_value=123) as mock_insert_run,
             patch("DB.execute_sql_statement") as mock_exec,
         ):
             pti.run_probe_and_tip_import(
@@ -214,43 +221,53 @@ class TestRunProbeAndTipImport:
                 department_id=1,
                 **kwargs,
             )
-            return mock_exec, mock_app
+            return mock_exec, mock_app, mock_insert_run
 
     def test_full_refresh_deletes_department_rows(self, tmp_path):
-        mock_exec, _ = self._run(tmp_path, full_refresh=True)
+        mock_exec, _, _ = self._run(tmp_path, full_refresh=True)
         sqls = [c.args[0] for c in mock_exec.call_args_list]
         assert any("DELETE FROM tblTipAngles" in s and "DepartmentID = 1" in s
                    for s in sqls)
 
     def test_delete_unused_updates_then_deletes(self, tmp_path):
-        mock_exec, _ = self._run(tmp_path, delete_unused=True)
+        mock_exec, _, _ = self._run(tmp_path, delete_unused=True)
         sqls = [c.args[0] for c in mock_exec.call_args_list]
         assert any("IsStillThere = 0" in s for s in sqls)
         assert any("IsStillThere = 0" in s and "DELETE" in s for s in sqls)
 
     def test_partial_refresh_deletes_named_program(self, tmp_path):
-        mock_exec, _ = self._run(tmp_path, partial_refresh=True,
-                                 probe_name="PART_A.PRG")
+        mock_exec, _, _ = self._run(tmp_path, partial_refresh=True,
+                                    probe_name="PART_A.PRG")
         sqls = [c.args[0] for c in mock_exec.call_args_list]
         assert any("PART_A.PRG" in s and "DELETE" in s for s in sqls)
 
-    def test_import_run_logged(self, tmp_path):
-        mock_exec, _ = self._run(tmp_path)
+    def test_import_run_closed_with_end_time(self, tmp_path):
+        mock_exec, _, _ = self._run(tmp_path)
         sqls = [c.args[0] for c in mock_exec.call_args_list]
-        assert any("INSERT INTO tblImportRun" in s for s in sqls)
+        assert any("UPDATE tblTipAngle_ImportRun" in s and "EndTime = GETDATE()" in s for s in sqls)
+
+    def test_import_run_row_created_when_no_open_run_exists(self, tmp_path):
+        _, _, mock_insert_run = self._run(tmp_path, open_run_rows=[])
+        insert_sql = mock_insert_run.call_args.args[0]
+        assert "INSERT INTO tblTipAngle_ImportRun" in insert_sql
+
+    def test_import_run_row_not_created_when_open_run_exists(self, tmp_path):
+        _, _, mock_insert_run = self._run(tmp_path, open_run_rows=[{"ID": 77}])
+        mock_insert_run.assert_not_called()
 
     def test_pcdmis_quit_called_on_success(self, tmp_path):
-        _, mock_app = self._run(tmp_path)
+        _, mock_app, _ = self._run(tmp_path)
         mock_app.Quit.assert_called_once()
 
     def test_pcdmis_quit_called_on_exception(self, tmp_path):
         """PC-DMIS must be shut down even when an exception is raised mid-import."""
-        pti.TEMP_DIR = tmp_path / "pcdmis-temp"
         mock_app = MagicMock()
         with (
             patch("win32com.client.Dispatch", return_value=mock_app),
             patch("probe_tip_import.enumerate_pcdmis_programs",
                   side_effect=RuntimeError("boom")),
+            patch("DB.get_sql_recordset", return_value=[]),
+            patch("DB.execute_sql_scalar_statement", return_value=123),
             patch("DB.execute_sql_statement"),
         ):
             with pytest.raises(RuntimeError, match="boom"):
