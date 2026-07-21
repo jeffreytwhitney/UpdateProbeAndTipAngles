@@ -277,6 +277,126 @@ class TestRunProbeAndTipImport:
 
 
 # ---------------------------------------------------------------------------
+# Multi-department staging/orchestration
+# ---------------------------------------------------------------------------
+
+class TestMultiDepartmentImport:
+    def test_clear_directory_contents_keeps_root_and_removes_children(self, tmp_path):
+        root = tmp_path / "pcdmis-temp"
+        root.mkdir()
+        (root / "a.txt").write_text("x")
+        nested = root / "nested"
+        nested.mkdir()
+        (nested / "b.PRG").write_text("y")
+
+        pti._clear_directory_contents(root)
+
+        assert root.exists()
+        assert list(root.iterdir()) == []
+
+    def test_copy_prg_files_to_temp_copies_only_prg_files(self, tmp_path):
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "A.PRG").write_text("a")
+        (source / "B.txt").write_text("b")
+        sub = source / "sub"
+        sub.mkdir()
+        (sub / "C.prg").write_text("c")
+
+        temp = tmp_path / "temp"
+        copied = pti._copy_prg_files_to_temp(source, temp)
+
+        assert copied == 2
+        assert (temp / "A.PRG").is_file()
+        assert (temp / "sub" / "C.prg").is_file()
+        assert not (temp / "B.txt").exists()
+
+    def test_run_multi_department_import_stages_and_runs_each_department(self, tmp_path):
+        departments = [
+            pti.DepartmentImport(department_id=15, department_name="Turning", dirpath=r"C:\src\turning"),
+            pti.DepartmentImport(department_id=12, department_name="Mills", dirpath=r"C:\src\mills"),
+        ]
+
+        with (
+            patch("probe_tip_import._ensure_pcdmis_session"),
+            patch("probe_tip_import._shutdown_pcdmis_session"),
+            patch("probe_tip_import._clear_directory_contents") as mock_clear,
+            patch("probe_tip_import._copy_prg_files_to_temp", return_value=1) as mock_copy,
+            patch("probe_tip_import.run_probe_and_tip_import", return_value={"newly_added": 2, "updated": 3}) as mock_run,
+        ):
+            pti.run_multi_department_import(
+                departments=departments,
+                temp_directory=str(tmp_path / "pcdmis-temp"),
+                delete_unused=True,
+                full_refresh=False,
+                partial_refresh=False,
+                probe_name="",
+            )
+
+        assert mock_clear.call_count == 2
+        assert mock_copy.call_count == 2
+        assert mock_run.call_args_list == [
+            call(
+                directory_path=str(tmp_path / "pcdmis-temp"),
+                department_id=15,
+                delete_unused=True,
+                full_refresh=False,
+                partial_refresh=False,
+                probe_name="",
+                manage_session=False,
+            ),
+            call(
+                directory_path=str(tmp_path / "pcdmis-temp"),
+                department_id=12,
+                delete_unused=True,
+                full_refresh=False,
+                partial_refresh=False,
+                probe_name="",
+                manage_session=False,
+            ),
+        ]
+
+    def test_run_multi_department_import_skips_when_no_prg_files(self, tmp_path):
+        departments = [pti.DepartmentImport(department_id=20, department_name="Anoka", dirpath=r"C:\src\anoka")]
+
+        with (
+            patch("probe_tip_import._ensure_pcdmis_session"),
+            patch("probe_tip_import._shutdown_pcdmis_session"),
+            patch("probe_tip_import._clear_directory_contents"),
+            patch("probe_tip_import._copy_prg_files_to_temp", return_value=0),
+            patch("probe_tip_import.run_probe_and_tip_import") as mock_run,
+        ):
+            pti.run_multi_department_import(
+                departments=departments,
+                temp_directory=str(tmp_path / "pcdmis-temp"),
+            )
+
+        mock_run.assert_not_called()
+
+    def test_run_multi_department_import_opens_and_quits_com_once(self, tmp_path):
+        departments = [
+            pti.DepartmentImport(department_id=15, department_name="Turning", dirpath=r"C:\src\turning"),
+            pti.DepartmentImport(department_id=12, department_name="Mills", dirpath=r"C:\src\mills"),
+        ]
+
+        with (
+            patch("probe_tip_import._clear_directory_contents"),
+            patch("probe_tip_import._copy_prg_files_to_temp", return_value=1),
+            patch("probe_tip_import.run_probe_and_tip_import", return_value={"newly_added": 1, "updated": 0}),
+            patch("probe_tip_import.win32com.client.Dispatch") as mock_dispatch,
+        ):
+            mock_app = MagicMock()
+            mock_dispatch.return_value = mock_app
+            pti.run_multi_department_import(
+                departments=departments,
+                temp_directory=str(tmp_path / "pcdmis-temp"),
+            )
+
+        mock_dispatch.assert_called_once_with("PCDLRN.Application")
+        mock_app.Quit.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # LIVE integration test  – requires PC-DMIS 2025.2 installed
 # ---------------------------------------------------------------------------
 
