@@ -241,12 +241,13 @@ if __name__ == "__main__":
     # 6  =     Additive
     # 10 =     Pacing
     # 5 =      Cardio
+    # 20 =     Anoka
 
 
 
 
     directory_path = r"C:\pcdmis-temp"
-    department_id = 12
+    department_id = 20
     delete_unused = True
     full_refresh = False
     partial_refresh = False
