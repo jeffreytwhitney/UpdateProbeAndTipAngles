@@ -81,6 +81,28 @@ class TestEsc:
 # ---------------------------------------------------------------------------
 
 class TestStoreTipAngles:
+    def test_log_identifies_loaded_module_and_file_before_open(self, tmp_path, monkeypatch):
+        prg_file = tmp_path / "PART_LOGGED.PRG"
+        prg_file.write_text("fake")
+        log_file = tmp_path / "crash_log.txt"
+        log_file.write_text("stale run")
+        monkeypatch.setattr(pti, "LOG_FILE_PATH", log_file)
+        pti._clear_log()
+
+        mock_part = _make_dmis_part("PART_LOGGED", [])
+        pti._dmis_parts = MagicMock()
+
+        def open_program(path, mode):
+            log_contents = log_file.read_text(encoding="utf-8")
+            assert f"Loaded module: {Path(pti.__file__).resolve()}" in log_contents
+            assert f"Opening: {prg_file}" in log_contents
+            return mock_part
+
+        pti._dmis_parts.Open.side_effect = open_program
+        pti.store_tip_angles("PART_LOGGED.PRG", str(prg_file), department_id=1)
+
+        assert "stale run" not in log_file.read_text(encoding="utf-8")
+
     def test_inserts_probe_tip_pairs(self, tmp_path):
         """Each LOADPROBE(61) + TIP(60) pair should produce one INSERT."""
         # Arrange
@@ -481,4 +503,3 @@ class TestLivePCDMIS:
             pti._close_part_no_save(dmis_part)
             dmis_app.Quit()
             shutil.rmtree(temp_dir, ignore_errors=True)
-

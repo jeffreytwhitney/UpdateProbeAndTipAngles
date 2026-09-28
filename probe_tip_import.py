@@ -1,5 +1,7 @@
 import shutil
+import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -9,6 +11,27 @@ import DB
 
 _dmis_app: Optional[Any] = None
 _dmis_parts: Optional[Any] = None
+
+LOG_FILE_PATH = Path(__file__).resolve().parent / "crash_log.txt"
+
+
+def _clear_log() -> None:
+    """Wipe the crash log at the start of a run so it only reflects this run."""
+    LOG_FILE_PATH.write_text(
+        f"Run started: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"Loaded module: {Path(__file__).resolve()}\n"
+        f"Python executable: {Path(sys.executable).resolve()}\n"
+        f"Working directory: {Path.cwd()}\n"
+        f"Log file: {LOG_FILE_PATH.resolve()}\n",
+        encoding="utf-8",
+    )
+
+
+def _log_opening_file(file_path: str) -> None:
+    """Record the file about to be opened, so a crash can be traced to it."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_FILE_PATH, "a", encoding="utf-8") as log_file:
+        log_file.write(f"[{timestamp}] Opening: {file_path}\n")
 
 
 @dataclass(frozen=True)
@@ -28,6 +51,7 @@ def store_tip_angles(file_name: str, file_path: str, department_id: int) -> None
     dmis_part = None
     processed_ok = False
     try:
+        _log_opening_file(file_path)
         dmis_part = _dmis_parts.Open(str(file_path), "OFFLINE")
         dmis_commands = dmis_part.Commands
 
@@ -130,6 +154,9 @@ def run_probe_and_tip_import(
     owns_session = False
     counts = {"newly_added": 0, "updated": 0}
 
+    if manage_session:
+        _clear_log()
+
     open_run_sql = (
         "SELECT TOP 1 ID "
         "FROM tblTipAngle_ImportRun "
@@ -225,6 +252,7 @@ def run_multi_department_import(
     temp_root = Path(temp_directory)
     department_stats: list[tuple[str, int, int]] = []
 
+    _clear_log()
     set_status("Opening PC-DMIS...")
     _ensure_pcdmis_session()
     try:
@@ -242,7 +270,6 @@ def run_multi_department_import(
                 continue
             else:
                 set_status(f"Copying PRG files to {department.department_name}")
-        
 
             counts = run_probe_and_tip_import(
                 directory_path=str(temp_root),
@@ -315,7 +342,7 @@ def _ensure_pcdmis_session() -> None:
     """Create PC-DMIS COM app/session if not already available."""
     global _dmis_app, _dmis_parts
     if _dmis_app is None or _dmis_parts is None:
-        _dmis_app = win32com.client.Dispatch("PCDLRN.Application")
+        _dmis_app = win32com.client.Dispatch("PCDLRN.Application.20.2")
         _dmis_parts = _dmis_app.PartPrograms
 
 
@@ -375,8 +402,11 @@ if __name__ == "__main__":
         DepartmentImport(department_id=20, department_name="Anoka", dirpath=r"\\vrmss-fs1\DNC\CMM Programs\LEVEL 2 Approved Programs"),
     ]
 
+
+
+
     temp_directory = r"C:\pcdmis-temp"
-    delete_unused = False
+    delete_unused = True
     full_refresh = False
     partial_refresh = False
     probe_name = ""
