@@ -310,16 +310,17 @@ def _close_part_no_save(dmis_part: Optional[Any]) -> None:
     if dmis_part is None:
         return
 
-    close_member = getattr(dmis_part, "Close", None)
-    if callable(close_member):
-        for args in ((False,), (0,), tuple()):
-            try:
-                close_member(*args)
-                return
-            except TypeError:
-                continue
-            except Exception:
-                break
+    # I think this is what is causing the analysis views to keep showing up when it's closing.
+    # close_member = getattr(dmis_part, "Close", None)
+    # if callable(close_member):
+    #     for args in ((False,), (0,), tuple()):
+    #         try:
+    #             close_member(*args)
+    #             return
+    #         except TypeError:
+    #             continue
+    #         except Exception:
+    #             break
 
     quit_member = getattr(dmis_part, "Quit", None)
     if callable(quit_member):
@@ -401,9 +402,6 @@ if __name__ == "__main__":
         DepartmentImport(department_id=5, department_name="Cardio", dirpath=r"V:\Inspect Programs\CMM Programs\B_S Approved Programs\PDF Approved Programs\Cardio Approved"),
         DepartmentImport(department_id=20, department_name="Anoka", dirpath=r"\\vrmss-fs1\DNC\CMM Programs\LEVEL 2 Approved Programs"),
     ]
-
-
-
 
     temp_directory = r"C:\pcdmis-temp"
     delete_unused = True
